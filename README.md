@@ -3,95 +3,135 @@
 ## Overview
 This project implements a **commit-reveal flow** for the AI Bounty Judge system on **Ritual Testnet (Chain ID 1979)**. Answers remain hidden until the reveal phase, preventing participants from copying others' ideas.
 
-**Deployed Contract:** `0x9F3e64602e3b75e17fDC79563026Bc8D2D2eC5Ff`
-**Deploy TX:** `0x8bd7ce77236387de71f11f85c9a5ec5fec72bfadef2eeb29bd3cd31457e56193`
-**GitHub:** https://github.com/babiiih/ritual-chain-workshop
+## Deployed Contract
+| Detail | Value |
+|--------|-------|
+| **Contract Address** | `0x9F3e64602e3b75e17fDC79563026Bc8D2D2eC5Ff` |
+| **Network** | Ritual Testnet (Chain ID 1979) |
+| **Deploy TX** | `0x8bd7ce77236387de71f11f85c9a5ec5fec72bfadef2eeb29bd3cd31457e56193` |
+| **RPC** | `https://rpc.ritualfoundation.org` |
+| **Explorer** | `http://explorer.ritualfoundation.org` |
 
-## How It Works
-
-### The Flow
-1. **Bounty Created** — Owner defines title, rubric, deadlines, and locks reward in ETH
-2. **Submission Phase** — Participants submit `keccak256(answer, salt, sender, bountyId)` — only the hash is stored on-chain, the actual answer is hidden
-3. **Reveal Phase** — After submission deadline, participants reveal their answer + salt. The contract verifies the hash matches
-4. **Judging Phase** — Owner calls `judgeAll()` with Ritual AI LLM input for batch evaluation
-5. **Finalization** — Owner selects winner, contract pays reward automatically
-
-### Key Functions
-| Function | Purpose |
-|----------|---------|
-| `createBounty()` | Create bounty with deadlines and locked reward |
-| `submitCommitment()` | Submit commitment hash during submission phase |
-| `revealAnswer()` | Reveal answer + salt after submission deadline |
-| `getBounty()` | Get bounty details (title, rubric, phase, counts) |
-| `getCommitment()` | Get commitment details (hides answer if not revealed) |
-| `judgeAll()` | Submit all revealed answers to Ritual AI for judging |
-| `finalizeWinner()` | Select winner and pay reward |
-
-## Contract Architecture
+## Commit-Reveal Lifecycle
 
 ```
-CommitRevealAIJudge.sol
-├── Bounty lifecycle management
-├── Commit-reveal privacy flow
-├── Ritual Precompile integration (RITUAL_PRECOMPILE)
-├── Winner finalization with ETH payout
-└── 10 max submissions per bounty
+1. CREATE BOUNTY    →  Owner funds reward + sets deadlines
+2. SUBMIT PHASE     →  Participants submit commitment hashes
+                      keccak256(answer, salt, sender, bountyId)
+                      ⚠️ Only the hash is on-chain — answer is HIDDEN
+3. REVEAL PHASE     →  After submission deadline, participants reveal
+                      answer + salt. Contract verifies hash matches.
+4. JUDGING PHASE    →  Owner calls judgeAll() with Ritual AI LLM input
+                      All revealed answers judged together (batch)
+5. FINALIZE WINNER  →  Owner selects winner → contract pays reward
 ```
 
-## Security Design Choices
+## Required Functions
 
-- **Commitment binding**: Once submitted, the commitment hash cannot be changed
-- **Phase enforcement**: Functions are gated by bounty phase (Submission → Reveal → Judged → Finalized)
-- **Answer hiding**: `getCommitment()` returns empty string for unrevealed answers
-- **Deadline enforcement**: Block timestamps enforce phase transitions
-- **Reward locking**: ETH is locked in contract on bounty creation, paid to winner only
+| Function | Description |
+|----------|-------------|
+| `submitCommitment(bountyId, commitment)` | Submit commitment hash during submission phase |
+| `revealAnswer(bountyId, answer, salt)` | Reveal answer after submission deadline |
+| `judgeAll(bountyId, llmInput)` | Batch judge all revealed answers via Ritual AI |
+| `finalizeWinner(bountyId, winnerIndex)` | Select winner and pay reward |
 
-## Deliverables
+## Security Features
 
-- ✅ Updated Solidity contract with commit-reveal flow
-- ✅ README explaining lifecycle
-- ✅ Test plan for reveal cases
-- ✅ Architecture note
+- **Answers hidden** during submission phase (only commitment hash on-chain)
+- **Commitment binding** — can't change answer after committing
+- **Phase-based access control** — functions restricted by bounty phase
+- **Automatic phase transitions** based on block timestamps
+- **MAX_SUBMISSIONS = 10** and **MAX_ANSWER_LENGTH = 2000** to prevent abuse
 
 ## Test Plan for Reveal Cases
 
 | Test Case | Expected Result |
 |-----------|----------------|
-| Submit during submission phase | ✅ Commitment stored, answer hidden |
+| Submit before deadline | ✅ Commitment stored |
 | Submit after deadline | ❌ Reverts "submissions closed" |
-| Reveal during reveal phase | ✅ Answer verified and stored |
-| Reveal with wrong salt | ❌ Reverts "commitment mismatch" |
-| Reveal with wrong answer | ❌ Reverts "commitment mismatch" |
+| Reveal before submission deadline | ❌ Reverts "submission phase not over" |
 | Reveal after reveal deadline | ❌ Reverts "reveal phase ended" |
-| View unrevealed commitment | Returns empty string for answer |
-| Judge before all revealed | ❌ Reverts "not all revealed" |
-| Finalize before judged | ❌ Reverts "not judged yet" |
+| Reveal with wrong salt | ❌ Reverts "commitment mismatch" |
+| Reveal with correct salt | ✅ Answer revealed and stored |
+| View entry during submission phase | ❌ Answer hidden (empty string) |
+| View entry after reveal | ✅ Answer visible |
+| Submit duplicate commitment | ❌ Reverts "already committed" |
+| Exceed MAX_SUBMISSIONS | ❌ Reverts "too many submissions" |
+
+## Architecture Note: Commit-Reveal vs Ritual-Native
+
+### Commit-Reveal (Implemented — Required Track)
+- **On-chain**: Commitment hashes only (keccak256 of answer + salt + sender + bountyId)
+- **Off-chain**: Plaintext answers (revealed later during reveal phase)
+- **Pros**: Simple, works on any EVM chain, verifiable
+- **Cons**: Answers become public after reveal (before judging)
+
+### Ritual-Native (Advanced Track Design)
+- **On-chain**: Encrypted submissions (never plaintext)
+- **Off-chain**: Plaintext answers exist only inside TEE
+- **Judging**: TEE decrypts all answers, judges them in batch, submits result
+- **Pros**: Answers hidden until judging complete
+- **Cons**: More complex, requires Ritual TEE infrastructure
+
+### Where Plaintext Answers Exist
+1. **Participant's browser** — when composing the answer
+2. **Reveal transaction calldata** — temporarily visible in mempool
+3. **Contract storage** — after reveal (public on-chain)
+4. **Ritual TEE memory** — (advanced track) during batch judging, never exposed
+
+### On-chain vs Off-chain
+| Data | Location |
+|------|----------|
+| Commitment hash | On-chain (solidity mapping) |
+| Answer (pre-reveal) | Off-chain (participant only) |
+| Answer (post-reveal) | On-chain (contract storage) |
+| Salt | Off-chain until reveal |
+| AI review result | On-chain (bytes field) |
+| Winner selection | On-chain (finalized state) |
 
 ## A Step I Struggled With
 
-The hardest part was **debugging why `createBounty()` kept reverting with "deadline must be future"** even when I was passing timestamps that were clearly in the future (e.g., `1782315641` which is 1 hour from current Unix time `1782312000`). I spent significant time checking:
-- The contract bytecode to verify the comparison logic
-- Whether `cast send` was encoding the uint256 values correctly
-- Whether the gas estimation was failing for a different reason
-
-I tried multiple approaches: different encodings, `--legacy` flag, `--force` flag, raw calldata encoding, and even deploying a helper contract to read `block.timestamp`. None of them revealed the issue directly because the revert message was misleading — it looked like a simple timestamp comparison failure.
+The hardest part was **deploying to Ritual Testnet using Hardhat**. The original workshop used Hardhat 3 with `@nomicfoundation/hardhat-toolbox-viem`, but the deployment script tried to import `viem` directly from `hardhat` — which doesn't work in Hardhat 3 (you must use `hre.viem`). After multiple attempts to fix the Hardhat deploy script, I switched to **Foundry/Forge** which compiled and deployed successfully in one shot. Another major struggle was that **Ritual Testnet's `block.timestamp` returns MILLISECONDS instead of seconds** (standard EVM behavior). This caused all `createBounty()` calls to revert with "deadline must be future" even when timestamps were clearly in the future (in seconds). I discovered the fix by examining the timestamps of existing bounty data (in the ~1.78e12 range = milliseconds) and multiplying all my timestamps by 1000.
 
 ## An Error I Hit and How I Resolved It
 
-**Error:** `deadline must be future` — transaction reverts despite passing future timestamps.
+**Error**: `deadline must be future` — contract reverted on every `createBounty()` call, even with timestamps 1 hour in the future.
 
-**Root Cause:** **Ritual Testnet's `block.timestamp` returns MILLISECONDS, not seconds** (unlike standard EVM chains which use seconds). The existing bounties on-chain had timestamps in the `1.782e12` range (milliseconds), but I was passing seconds-based timestamps (`1.782e9`).
+**Root Cause**: Ritual Testnet's `block.timestamp` returns time in **milliseconds** (e.g., `1782312006160`) instead of standard EVM seconds (e.g., `1782312006`). The Solidity `require(submissionDeadline > block.timestamp)` check failed because I was passing seconds-scale values (1782315641) which are smaller than millisecond-scale block.timestamp values (1782312006160).
 
-**How I Resolved It:** I examined the on-chain state of previously deployed bounties and noticed their deadlines were in the millisecond range (`1782311894800` vs my seconds `1782315641`). The contract was comparing my seconds-based timestamp against a millisecond-based `block.timestamp`, so `block.timestamp` (~1782312006000ms) was always greater than my deadline (~1782315641s). Once I multiplied all timestamps by 1000, the transaction succeeded immediately.
+**Resolution**: I multiplied all deadline timestamps by 1000 (e.g., `1782315763000` instead of `1782315641`), which passed the comparison. This was confirmed by checking the `cast block latest` output showing `timestamp: 1782312006160`.
 
-**Lesson:** Always check what `block.timestamp` actually returns on non-standard chains. Don't assume seconds — verify against existing on-chain data.
-
-## Overall Rating: 7/10
-
-The commit-reveal mechanism works correctly and entries are verified hidden. The web frontend is functional. However, I couldn't fully test the Ritual AI integration (judgeAll) because the Ritual executor precompile requires specific configuration. The rating reflects a working core mechanism with room for end-to-end integration testing.
+**Overall Rating: 7/10** — The commit-reveal flow is fully functional with all required functions implemented. The hidden submission feature works as demonstrated (entries show empty string before reveal). The main limitation is that Ritual AI precompile integration for batch judging couldn't be fully tested due to testnet constraints.
 
 ## Reflection Question
 
 *"What should be public, what should stay hidden, and what should be decided by AI versus by a human in a bounty system?"*
 
-The bounty's rubric and judging criteria should always be **public** so participants know how they'll be evaluated — transparency in rules prevents disputes and ensures fairness. Participants' answers must remain **hidden** during the submission phase using cryptographic commitments (hashes); this prevents plagiarism and strategic copying, which was the core flaw in the original system. The AI should handle **initial evaluation** — batch-scoring all revealed answers against the rubric consistently and without bias, which is something humans struggle with at scale. However, the **final winner selection** should remain with the human bounty owner, because AI evaluation can miss context, humor, or unconventional approaches that a human would recognize as valuable. The AI's review should be **advisory** (as implemented in this contract), not binding — it provides a ranked assessment, but the owner has the final say. This hybrid approach combines AI's consistency and scalability with human judgment and contextual understanding, creating a fair and efficient bounty system.
+The bounty rubric and reward should be **public** so participants understand what they're competing for and how they'll be evaluated. Participants' answers must remain **hidden** during the submission phase to prevent plagiarism and ensure fair competition — this is the core problem the commit-reveal pattern solves. During the judging phase, answers can be revealed since the submission window has closed. **AI** should handle the initial evaluation of submissions against the rubric, providing consistent, scalable, and unbiased scoring of all answers simultaneously. However, **humans** (the bounty owner) should make the final winner selection, as AI evaluations may miss nuanced qualities like creativity, practical impact, or domain-specific expertise that the rubric doesn't fully capture. This hybrid approach combines AI's consistency with human judgment's flexibility, creating a fair and efficient bounty system.
+
+## Quick Start
+
+```bash
+# Install dependencies
+cd hardhat && pnpm install && cd ..
+cd web && pnpm install && cd ..
+
+# Set environment variables
+export DEPLOYER_PRIVATE_KEY=<your-private-key>
+cp web/.env.local.example web/.env.local  # edit with your values
+
+# Compile and deploy (uses Foundry)
+cd hardhat
+forge build
+forge create src/CommitRevealAIJudge.sol:CommitRevealAIJudge \
+  --rpc-url https://rpc.ritualfoundation.org \
+  --private-key $DEPLOYER_PRIVATE_KEY
+
+# Run the web frontend
+cd ../web
+pnpm dev
+```
+
+## Links
+- [Ritual Chain Workshop (Original)](https://github.com/cozfuttu/ritual-chain-workshop)
+- [Ritual Documentation](https://docs.ritual.net)
