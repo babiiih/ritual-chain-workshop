@@ -1,311 +1,85 @@
-# Privacy-Preserving AI Bounty Judge - Commit-Reveal Implementation
+# Privacy-Preserving AI Bounty Judge — Commit-Reveal Implementation
 
-## Problem Statement
+## Deployed Contract
+- **Network:** Ritual Testnet (Chain ID 1979)
+- **Contract Address:** `0x9F3e64602e3b75e17fDC79563026Bc8D2D2eC5Ff`
+- **Deploy TX:** `0x8bd7ce77236387de71f11f85c9a5ec5fec72bfadef2eeb29bd3cd31457e56193`
+- **RPC:** `https://rpc.ritualfoundation.org`
+- **Explorer:** `http://explorer.ritualfoundation.org`
 
-### The Critical Flaw
-In the original AI Judge system, **submissions were public during the submission phase**. This created a major vulnerability:
+## Architecture
 
-| Issue | Impact |
-|-------|--------|
-| **Answers visible** | Participants could see others' submissions |
-| **Copy improved versions** | Late submitters could copy and improve early answers |
-| **Unfair advantage** | Those who submit later get unfair advantage |
-| **Undermined integrity** | The bounty system becomes unfair |
-
-### Example Scenario
-1. Alice submits a creative solution at T=10
-2. Bob sees Alice's answer at T=11
-3. Bob copies Alice's idea, improves it, submits at T=12
-4. Bob wins with "improved" version of Alice's idea
-
-**This is unfair!** Alice should win because she had the original idea.
-
----
-
-## Solution: Commit-Reveal Pattern
-
-### Core Concept
-The commit-reveal pattern separates **submission** from **disclosure**:
-
-1. **Commit Phase**: Submit a cryptographic hash (commitment) that proves you know the answer
-2. **Reveal Phase**: After deadline, reveal your answer and salt
-3. **Verification**: Contract verifies the revealed answer matches the commitment
-4. **Judging**: Only verified, revealed answers are eligible for AI judging
-
-### Why This Works
-- **During submission**: Only hashes visible — can't see actual answers
-- **After deadline**: Reveal phase begins — can't change your answer
-- **Before judging**: All answers revealed — AI can judge fairly
-
----
-
-## Implementation Details
-
-### Smart Contract Architecture
-
-```
-+---------------------------------------------------------------+
-|                  CommitRevealAIJudge                          |
-+---------------------------------------------------------------+
-|  State Variables:                                             |
-|  - nextBountyId (uint256)                                    |
-|  - bounties (mapping(uint256 => Bounty))                     |
-|  - hasCommitted (mapping(uint256 => mapping(address => bool)))|
-+---------------------------------------------------------------+
-|  Bounty Struct:                                               |
-|  - owner, title, rubric, reward                              |
-|  - submissionDeadline, revealDeadline                        |
-|  - phase (Phase enum)                                        |
-|  - commitments (Commitment[])                                |
-+---------------------------------------------------------------+
-|  Commitment Struct:                                           |
-|  - submitter (address)                                       |
-|  - commitment (bytes32)                                      |
-|  - revealed (bool)                                           |
-|  - revealedAnswer (string)                                   |
-+---------------------------------------------------------------+
-```
-
-### Phase Flow
-
-```
-PHASE 1: SUBMISSION --> PHASE 2: REVEAL --> PHASE 3: JUDGING --> FINALIZED
-
-  - Submit hash only    - Reveal answer     - AI Judges answers   - Winner paid
-  - Answer hidden       - Verify matches    - Select winner
-```
+### Commit-Reveal Flow (Required Track)
+1. **Submission Phase**: Participants submit `keccak256(abi.encodePacked(answer, salt, msg.sender, bountyId))` — only the hash is stored on-chain, the actual answer is hidden.
+2. **Reveal Phase**: After the submission deadline, participants reveal their answer + salt. The contract recomputes the hash and verifies it matches the original commitment.
+3. **Judging Phase**: The bounty owner calls `judgeAll(bountyId, llmInput)` which sends all revealed answers to the Ritual AI precompile for batch evaluation.
+4. **Finalization**: Owner reviews AI ranking and selects a winner via `finalizeWinner()`. The reward is transferred to the winner.
 
 ### Key Functions
+| Function | Description |
+|----------|-------------|
+| `createBounty()` | Create a bounty with submission/reveal deadlines and locked reward |
+| `submitCommitment()` | Submit commitment hash during submission phase |
+| `revealAnswer()` | Reveal answer + salt after submission deadline |
+| `judgeAll()` | Send revealed answers to Ritual AI for batch judging |
+| `finalizeWinner()` | Select winner and transfer reward |
 
-#### 1. `createBounty()`
-Creates a new bounty with two deadlines:
-- `submissionDeadline`: When commitments close
-- `revealDeadline`: When reveals close (must be after submission)
+### Security Properties
+- Answers are **completely hidden** during submission phase (only hash on-chain)
+- Commitment is **binding** — cannot change answer after committing
+- Phase-based access control prevents out-of-order actions
+- Answer length capped at 2000 chars to prevent gas griefing
+- Max 10 submissions per bounty
 
-```solidity
-function createBounty(
-    string calldata title,
-    string calldata rubric,
-    uint256 submissionDeadline,
-    uint256 revealDeadline
-) external payable returns (uint256 bountyId)
-```
+### What's Public vs Hidden?
+| Data | Visibility |
+|------|-----------|
+| Commitment hash | Public (on-chain) |
+| Actual answer | Hidden until reveal |
+| Bounty rubric | Public |
+| AI review | On-chain after judging |
+| Winner selection | On-chain, owner decision |
 
-#### 2. `submitCommitment()`
-Submits a commitment hash during submission phase:
-```solidity
-function submitCommitment(
-    uint256 bountyId,
-    bytes32 commitment  // keccak256(abi.encodePacked(answer, salt, msg.sender, bountyId))
-) external
-```
-
-#### 3. `revealAnswer()`
-Reveals the answer after submission deadline:
-```solidity
-function revealAnswer(
-    uint256 bountyId,
-    string calldata answer,
-    bytes32 salt
-) external
-```
-
-#### 4. `judgeAll()` (Owner Only)
-Judges all revealed answers using Ritual AI:
-```solidity
-function judgeAll(
-    uint256 bountyId,
-    bytes calldata llmInput
-) external onlyOwner(bountyId)
-```
-
-#### 5. `finalizeWinner()` (Owner Only)
-Selects winner and pays reward:
-```solidity
-function finalizeWinner(
-    uint256 bountyId,
-    uint256 winnerIndex
-) external onlyOwner(bountyId)
-```
-
----
-
-## Security Analysis
-
-### What's Hidden, What's Public
-
-| Data | During Submission | During Reveal | After Judging |
-|------|-------------------|---------------|---------------|
-| **Answer** | Hidden (hash only) | Revealed | Public |
-| **Salt** | Hidden | Revealed | Public |
-| **Submitter** | Public | Public | Public |
-| **Commitment** | Public | Public | Public |
-| **Rubric** | Public | Public | Public |
-
-### Attack Vectors and Mitigations
-
-| Attack | Mitigation |
-|--------|------------|
-| **Copy during submission** | Only hashes visible, can't reverse |
-| **Change answer after commit** | Commitment is binding (hash match) |
-| **Front-running** | Deadline-based, not first-come-first-served |
-| **Denial of reveal** | Grace period for reveals |
-| **Sybil attacks** | One commitment per address per bounty |
-
-### Commitment Binding
-The commitment hash proves:
-1. You knew the answer at commitment time
-2. You can't change it without invalidating the hash
-3. The salt prevents rainbow table attacks
-
-```
-commitment = keccak256(abi.encodePacked(answer, salt, msg.sender, bountyId))
-```
-
----
-
-## Comparison: Commit-Reveal vs Ritual-Native
-
-### Approach 1: Commit-Reveal (Implemented)
-**On-chain:** Commitment hashes, phase transitions, winner selection
-**Off-chain:** Plaintext answers (revealed later), salt values
-
-**Pros:**
-- Simple implementation
-- Works on any EVM chain
-- No TEE dependency
-- Lower gas costs
-
-**Cons:**
-- Answers become public before judging
-- Potential for last-minute reveals
-- Requires active participation (reveal step)
-
-### Approach 2: Ritual-Native (Advanced Track)
-**On-chain:** Encrypted submissions, phase transitions
-**Off-chain:** Plaintext answers (never on-chain), decryption keys in TEE
-
-**Pros:**
-- Answers hidden until judging
-- Better privacy
-- No reveal step needed
-
-**Cons:**
-- More complex implementation
-- Requires Ritual TEE
-- Higher gas costs
-- Ritual-specific dependency
-
----
-
-## Deployment and Testing
-
-### Contract Details
-- **Network:** Ritual Testnet (Chain ID 1979)
-- **Contract Address:** `0x0d57fA1bA3446508019366637AbD035B00Aa51B4`
-- **Deploy TX:** `0x359a6bf855b210125b34e5a464795f88dbde8586e3744ab8118109c932d495f3`
-- **Deployer:** `0x1801Ade4ebD374CCB3ddFC3AF64C539433DF4fBa`
-
-### Test Plan
-
-#### Test Case 1: Basic Commit-Reveal Flow
-```javascript
-// 1. Create bounty
-await contract.createBounty("Test", "Rubric", deadline1, deadline2, {value: parseEther("0.1")});
-
-// 2. Submit commitment
-const answer = "My answer";
-const salt = ethers.utils.randomBytes(32);
-const commitment = ethers.utils.solidityKeccak256(
-  ["string", "bytes32", "address", "uint256"],
-  [answer, salt, userAddress, bountyId]
-);
-await contract.submitCommitment(bountyId, commitment);
-
-// 3. Reveal (after deadline)
-await contract.revealAnswer(bountyId, answer, salt);
-
-// 4. Judge
-await contract.judgeAll(bountyId, llmInput);
-```
-
-#### Test Case 2: Invalid Reveal (Mismatched Commitment)
-```javascript
-// Should revert with "commitment mismatch"
-await contract.revealAnswer(bountyId, "wrong answer", salt);
-```
-
-#### Test Case 3: Double Commit Prevention
-```javascript
-// Should revert with "already committed"
-await contract.submitCommitment(bountyId, commitment);
-await contract.submitCommitment(bountyId, commitment); // FAILS
-```
-
-#### Test Case 4: Deadline Enforcement
-```javascript
-// Should revert with "submissions closed" if after deadline
-await contract.submitCommitment(bountyId, commitment);
-```
-
----
-
-## Reflection Question
-
-**"What should be public, what should stay hidden, and what should be decided by AI versus by a human in a bounty system?"**
-
-**Answer (5-8 sentences):**
-
-**Public Elements:** Rubric and judging criteria should be public to ensure fairness and transparency. Submission deadlines and bounty rules must be visible to all participants. The commitment hashes should be public to prove submission without revealing content.
-
-**Hidden Elements:** Participants' answers must remain hidden during the submission phase to prevent copying. Salt values should stay hidden until reveal to maintain commitment binding. Personal information about submitters should be protected.
-
-**AI vs Human Judgment:** AI should handle initial evaluation based on rubric compliance, ensuring objective assessment and scalability. Humans should make final winner selection to account for nuanced judgment, context, and creative merit that AI may miss. The commitment hash proves submission without revealing content, while the reveal phase ensures accountability. This hybrid approach leverages AI efficiency while maintaining human oversight for fairness. Final payouts should be automated through smart contracts to ensure trustless execution.
-
----
-
-## Deliverables Checklist
-
-- [x] Updated Solidity contract with commit-reveal flow
-- [x] README explaining lifecycle (this document)
-- [x] Test plan for reveal cases (see Test Plan section)
-- [x] Architecture note comparing approaches (see Comparison section)
-- [x] Reflection question answered (see Reflection section)
-- [x] Deployed contract on Ritual Testnet
-- [x] GitHub repository with all code
-
----
-
-## Build and Run
+## Setup
 
 ### Prerequisites
-- Node.js >= 16
-- npm or yarn
-- Hardhat
+- Node.js + pnpm
+- Foundry (forge, cast)
 
-### Setup
+### Install
 ```bash
-cd hardhat
-npm install
+cd hardhat && pnpm install
+cd ../web && pnpm install
 ```
 
-### Compile
+### Configure
 ```bash
-npx hardhat compile
+# web/.env.local
+NEXT_PUBLIC_CONTRACT_ADDRESS=0x9F3e64602e3b75e17fDC79563026Bc8D2D2eC5Ff
+NEXT_PUBLIC_RITUAL_RPC_URL=https://rpc.ritualfoundation.org
+NEXT_PUBLIC_RITUAL_CHAIN_ID=1979
+NEXT_PUBLIC_RITUAL_EXECUTOR_ADDRESS=0xB42e435c4252A5a2E7440e37B609F00c61a0c91B
+NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=<your-project-id>
 ```
 
-### Deploy
+### Run
 ```bash
-npx hardhat ignition deploy ignition/modules/CommitRevealAIJudge.ts --network ritualTestnet
+cd web && pnpm dev
 ```
 
-### Test
-```bash
-npx hardhat test
-```
+## Test Plan
+1. Create bounty with future deadline
+2. Submit commitment from wallet A → entry should be hidden
+3. Try to view answer from wallet B → should see empty string
+4. After deadline, reveal answer with correct salt → entry becomes visible
+5. Try revealing with wrong salt → should revert
+6. Call judgeAll → AI reviews all revealed answers
+7. Finalize winner → reward transferred
 
----
+## A Step I Struggled With
+The biggest challenge was discovering that **Ritual Testnet's `block.timestamp` returns milliseconds instead of the standard seconds** that Solidity's `block.timestamp` returns on other EVM chains. When I first tried to create a bounty with a deadline calculated in Unix seconds (e.g., `1782315641`), the contract kept reverting with `"deadline must be future"` — even though the deadline was clearly 1 hour in the future. I spent significant time debugging gas estimation, trying `--legacy` flags, and checking bytecode before I realized the existing bounties on-chain had timestamps in the trillions (millisecond range) while my values were in the billions (second range). Multiplying all deadline values by 1000 fixed the issue immediately. This is a critical gotcha for anyone building on Ritual Chain — always use `Date.now()` or equivalent millisecond timestamps, not `Math.floor(Date.now() / 1000)`.
 
-## License
+## Reflection Question
+> "What should be public, what should stay hidden, and what should be decided by AI versus by a human in a bounty system?"
 
-MIT License
+In a bounty system, the **judging rubric** and **bounty parameters** (reward, deadlines) should always be public so participants know what they're competing for and how they'll be evaluated. **Submissions** should remain hidden during the evaluation period — using commitment hashes or encryption — to prevent plagiarism and strategic copying. **AI** should handle the bulk of evaluation: it can objectively score submissions against a rubric at scale, catching nuances that busy humans might miss, and it provides consistency across all entries. However, the **final winner selection** should remain with a human (the bounty owner) because AI has limitations — it may miss creative approaches, misjudge domain expertise, or be vulnerable to prompt injection in submissions. The AI review serves as an advisory ranking, not an autonomous decision. This hybrid approach combines AI's scalability and consistency with human judgment's flexibility and accountability.
