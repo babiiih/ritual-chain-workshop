@@ -14,16 +14,23 @@ interface IRitualWallet {
 /**
  * @title CommitRevealAIJudge
  * @notice Privacy-preserving AI bounty judge with commit-reveal flow.
- *         Answers remain hidden until reveal phase, preventing copying.
+ *         Answers remain hidden until reveal phase, preventing participants
+ *         from copying others' ideas.
+ * 
+ * @dev Implements the commit-reveal pattern:
+ *      1. Submission Phase: Participants submit commitment hashes
+ *      2. Reveal Phase: After deadline, participants reveal answers
+ *      3. Judging Phase: AI judges revealed answers
+ *      4. Finalization: Winner selected and paid
  */
 contract CommitRevealAIJudge is PrecompileConsumer {
     uint256 public constant MAX_SUBMISSIONS = 10;
     uint256 public constant MAX_ANSWER_LENGTH = 2_000;
+    uint256 public constant RITUAL_PRECOMPILE = 0x7b7ad7d719C88F72Ed298bD7C21c7D6DdE1e7e3D;
 
     uint256 public nextBountyId = 1;
 
-    IRitualWallet wallet =
-        IRitualWallet(0x532F0dF0896F353d8C3DD8cc134e8129DA2a3948);
+    IRitualWallet wallet = IRitualWallet(0x532F0dF0896F353d8C3DD8cc134e8129DA2a3948);
 
     enum Phase { None, Submission, Reveal, Judged, Finalized }
 
@@ -98,9 +105,10 @@ contract CommitRevealAIJudge is PrecompileConsumer {
     /**
      * @notice Create a new bounty with submission and reveal deadlines
      * @param title Bounty title
-     * @param rubric Judging criteria
+     * @param rubric Judging criteria for AI
      * @param submissionDeadline Timestamp when commitments close
      * @param revealDeadline Timestamp when reveals close (must be after submission)
+     * @return bountyId The ID of the newly created bounty
      */
     function createBounty(
         string calldata title,
@@ -136,8 +144,9 @@ contract CommitRevealAIJudge is PrecompileConsumer {
 
     /**
      * @notice Submit a commitment hash during submission phase
+     * @dev Commitment = keccak256(abi.encodePacked(answer, salt, msg.sender, bountyId))
      * @param bountyId The bounty to submit to
-     * @param commitment keccak256(abi.encodePacked(answer, salt, msg.sender, bountyId))
+     * @param commitment The commitment hash (answer stays hidden)
      */
     function submitCommitment(
         uint256 bountyId,
@@ -166,8 +175,10 @@ contract CommitRevealAIJudge is PrecompileConsumer {
 
     /**
      * @notice Reveal answer after submission deadline
+     * @dev Verifies that keccak256(abi.encodePacked(answer, salt, msg.sender, bountyId))
+     *      matches the previously submitted commitment
      * @param bountyId The bounty to reveal for
-     * @param answer The original answer
+     * @param answer The original answer (plaintext)
      * @param salt The salt used in commitment
      */
     function revealAnswer(
@@ -197,7 +208,7 @@ contract CommitRevealAIJudge is PrecompileConsumer {
         }
         require(index != type(uint256).max, "no commitment found");
 
-        // Verify commitment
+        // Verify commitment matches
         bytes32 computed = keccak256(
             abi.encodePacked(answer, salt, msg.sender, bountyId)
         );
@@ -209,7 +220,6 @@ contract CommitRevealAIJudge is PrecompileConsumer {
         bounty.commitments[index].revealed = true;
         bounty.commitments[index].revealedAnswer = answer;
 
-        // Transition to reveal phase if not already
         if (bounty.phase == Phase.Submission) {
             bounty.phase = Phase.Reveal;
         }
@@ -219,88 +229,78 @@ contract CommitRevealAIJudge is PrecompileConsumer {
 
     /**
      * @notice Judge all revealed answers using Ritual AI
+     * @dev Only callable by bounty owner after reveal deadline
      * @param bountyId The bounty to judge
-     * @param llmInput Encoded LLM call data
+     * @param llmInput The input for the LLM (rubric + answers)
      */
     function judgeAll(
         uint256 bountyId,
         bytes calldata llmInput
-    ) external bountyExists(bountyId) onlyOwner(bountyId) {
+    ) external onlyOwner(bountyId) bountyExists(bountyId) {
         Bounty storage bounty = bounties[bountyId];
 
         require(
             block.timestamp >= bounty.revealDeadline,
-            "reveal phase not ended"
+            "reveal phase not over"
         );
-        require(
-            bounty.phase == Phase.Reveal || bounty.phase == Phase.Submission,
-            "already judged or finalized"
-        );
+        require(bounty.phase == Phase.Reveal, "not in reveal phase");
+        require(bounty.commitments.length > 0, "no submissions");
 
-        // Check at least one answer was revealed
-        bool hasRevealed = false;
+        // Verify all commitments are revealed
         for (uint256 i = 0; i < bounty.commitments.length; i++) {
-            if (bounty.commitments[i].revealed) {
-                hasRevealed = true;
-                break;
-            }
+            require(bounty.commitments[i].revealed, "not all revealed");
         }
-        require(hasRevealed, "no revealed answers");
 
-        bytes memory output = _executePrecompile(
-            LLM_INFERENCE_PRECOMPILE,
-            llmInput
-        );
+        (bool success, bytes memory result) = RITUAL_PRECOMPILE.call(llmInput);
+        require(success, "LLM call failed");
 
-        (
-            bool hasError,
-            bytes memory completionData,
-            ,
-            string memory errorMessage,
-
-        ) = abi.decode(output, (bool, bytes, bytes, string, ConvoHistory));
-
-        require(!hasError, errorMessage);
-
+        bounty.aiReview = result;
         bounty.phase = Phase.Judged;
-        bounty.aiReview = completionData;
 
-        emit AllAnswersJudged(bountyId, completionData);
+        emit AllAnswersJudged(bountyId, result);
     }
 
     /**
-     * @notice Finalize winner and pay reward
+     * @notice Finalize the winner and pay reward
+     * @dev Only callable by bounty owner after judging
      * @param bountyId The bounty to finalize
      * @param winnerIndex Index of the winning submission
      */
     function finalizeWinner(
         uint256 bountyId,
         uint256 winnerIndex
-    ) external bountyExists(bountyId) onlyOwner(bountyId) {
+    ) external onlyOwner(bountyId) bountyExists(bountyId) {
         Bounty storage bounty = bounties[bountyId];
 
         require(bounty.phase == Phase.Judged, "not judged yet");
-        require(winnerIndex < bounty.commitments.length, "invalid index");
-        require(
-            bounty.commitments[winnerIndex].revealed,
-            "winner not revealed"
-        );
+        require(winnerIndex < bounty.commitments.length, "invalid winner");
+        require(bounty.commitments[winnerIndex].revealed, "winner not revealed");
 
-        bounty.phase = Phase.Finalized;
         bounty.winnerIndex = winnerIndex;
+        bounty.phase = Phase.Finalized;
 
         address winner = bounty.commitments[winnerIndex].submitter;
-        uint256 reward = bounty.reward;
-        bounty.reward = 0;
 
-        (bool ok, ) = payable(winner).call{value: reward}("");
-        require(ok, "payment failed");
+        (bool success, ) = winner.call{value: bounty.reward}("");
+        require(success, "transfer failed");
 
-        emit WinnerFinalized(bountyId, winnerIndex, winner, reward);
+        emit WinnerFinalized(bountyId, winnerIndex, winner, bounty.reward);
     }
 
     /**
      * @notice Get bounty details
+     * @param bountyId The bounty to query
+     * @return owner Bounty creator
+     * @return title Bounty title
+     * @return rubric Judging criteria
+     * @return reward Bounty reward
+     * @return submissionDeadline Commitment deadline
+     * @return revealDeadline Reveal deadline
+     * @return phase Current phase
+     * @return commitmentCount Total commitments
+     * @return revealedCount Revealed commitments
+     * @return winnerIndex Winner index (type(uint256).max if not finalized)
+     * @return aiReview AI review bytes
      */
     function getBounty(
         uint256 bountyId
@@ -347,7 +347,13 @@ contract CommitRevealAIJudge is PrecompileConsumer {
     }
 
     /**
-     * @notice Get commitment details (only after reveal or for own commitments)
+     * @notice Get commitment details
+     * @param bountyId The bounty
+     * @param index Commitment index
+     * @return submitter Commitment creator
+     * @return commitment Commitment hash
+     * @return revealed Whether answer is revealed
+     * @return answer Revealed answer (empty if not revealed and not owner/submitter)
      */
     function getCommitment(
         uint256 bountyId,
@@ -358,6 +364,7 @@ contract CommitRevealAIJudge is PrecompileConsumer {
         bountyExists(bountyId)
         returns (
             address submitter,
+            bytes32 commitment,
             bool revealed,
             string memory answer
         )
@@ -367,29 +374,24 @@ contract CommitRevealAIJudge is PrecompileConsumer {
 
         Commitment storage c = bounty.commitments[index];
 
-        // Only show answer if revealed or if caller is the submitter/owner
         if (c.revealed || msg.sender == c.submitter || msg.sender == bounty.owner) {
-            return (c.submitter, c.revealed, c.revealedAnswer);
+            return (c.submitter, c.commitment, c.revealed, c.revealedAnswer);
         }
 
-        // Hide answer during submission/reveal phases
-        return (c.submitter, c.revealed, "");
+        return (c.submitter, c.commitment, c.revealed, "");
     }
 
     /**
-     * @notice Get current phase of a bounty
+     * @notice Get current phase (auto-transitions based on time)
+     * @param bountyId The bounty
+     * @return phase Current phase
      */
     function getPhase(
         uint256 bountyId
     ) external view bountyExists(bountyId) returns (Phase) {
         Bounty storage bounty = bounties[bountyId];
         
-        // Auto-transition phases based on time
         if (bounty.phase == Phase.Submission && block.timestamp >= bounty.submissionDeadline) {
-            return Phase.Reveal;
-        }
-        if (bounty.phase == Phase.Reveal && block.timestamp >= bounty.revealDeadline) {
-            // Can't auto-transition to Judged, needs judgeAll call
             return Phase.Reveal;
         }
         
