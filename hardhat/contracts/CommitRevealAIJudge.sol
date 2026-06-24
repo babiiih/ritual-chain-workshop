@@ -26,7 +26,7 @@ interface IRitualWallet {
 contract CommitRevealAIJudge is PrecompileConsumer {
     uint256 public constant MAX_SUBMISSIONS = 10;
     uint256 public constant MAX_ANSWER_LENGTH = 2_000;
-    uint256 public constant RITUAL_PRECOMPILE = 0x7b7ad7d719C88F72Ed298bD7C21c7D6DdE1e7e3D;
+    address public constant RITUAL_PRECOMPILE = 0x7b7AD7D719c88F72ed298bd7c21C7d6DDE1e7E3D;
 
     uint256 public nextBountyId = 1;
 
